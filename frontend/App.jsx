@@ -15,7 +15,7 @@ function App() {
   };
 
   const sendToAI = async () => {
-    const res = await fetch("https://YOUR_BACKEND_URL/simulate", {
+    const res = await fetch("https://voicelogic-qt6r.onrender.com/simulate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_text: text })
