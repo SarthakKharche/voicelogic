@@ -2,13 +2,13 @@ import logging
 import os
 from typing import List
 
-import openai
+from openai import OpenAI
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -31,7 +31,7 @@ class SimulationRequest(BaseModel):
 
 
 def _ensure_api_key() -> None:
-    if not openai.api_key:
+    if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set")
 
 
@@ -45,7 +45,7 @@ Salesperson says:
 {user_text}
 """
 
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "You are a realistic buyer."},
@@ -68,7 +68,7 @@ Buyer reply:
 {buyer_reply}
 """
 
-    feedback = openai.ChatCompletion.create(
+    feedback = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "You are a sales coach."},
