@@ -7,7 +7,8 @@ import Dashboard from "./Dashboard";
 import PersonaSelector from "./PersonaSelector";
 
 // Default to local backend in development; override with VITE_API_URL when deploying
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/simulate";
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_URL = `${API_BASE}/simulate`;
 
 function App() {
   const [user, setUser] = useState(null);
