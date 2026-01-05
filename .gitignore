@@ -1,0 +1,3 @@
+# Secrets and credentials
+voicelogic-firebase-adminsdk-*.json
+*.service-account.json
