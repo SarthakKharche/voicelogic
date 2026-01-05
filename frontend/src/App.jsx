@@ -1,16 +1,34 @@
 import { useEffect, useRef, useState } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import { auth } from "./firebaseConfig";
 import "./App.css";
+import Login from "./Login";
+import Dashboard from "./Dashboard";
+import PersonaSelector from "./PersonaSelector";
 
-const API_URL = import.meta.env.VITE_API_URL || "https://voicelogic-qt6r.onrender.com/simulate";
+// Default to local backend in development; override with VITE_API_URL when deploying
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/simulate";
 
 function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [view, setView] = useState("dashboard"); // dashboard, persona-selector, practice
+  const [selectedPersona, setSelectedPersona] = useState(null);
   const [transcript, setTranscript] = useState("");
   const [buyerReply, setBuyerReply] = useState("");
   const [coachFeedback, setCoachFeedback] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  const [selectedAccent, setSelectedAccent] = useState("us");
+  const [speechSupported, setSpeechSupported] = useState(
+    typeof window !== "undefined" && "speechSynthesis" in window
+  );
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const recognitionRef = useRef(null);
+  const voicesRef = useRef([]);
+  const utteranceRef = useRef(null);
 
   const requestMicPermission = async () => {
     if (!navigator?.mediaDevices?.getUserMedia) return true; // fall back to native prompt
@@ -28,11 +46,81 @@ function App() {
   };
 
   useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
     return () => {
       recognitionRef.current?.stop?.();
       recognitionRef.current = null;
+      stopSpeech();
     };
   }, []);
+
+  useEffect(() => {
+    if (!speechSupported || typeof window === "undefined") return;
+
+    const populateVoices = () => {
+      const voices = window.speechSynthesis?.getVoices?.() || [];
+      voicesRef.current = voices;
+      if (voices.length && !speechSupported) setSpeechSupported(true);
+    };
+
+    populateVoices();
+    window.speechSynthesis?.addEventListener?.("voiceschanged", populateVoices);
+    return () => window.speechSynthesis?.removeEventListener?.("voiceschanged", populateVoices);
+  }, [speechSupported]);
+
+  const pickVoice = (accent = "us") => {
+    if (!voicesRef.current?.length) return null;
+    const accentMap = {
+      us: ["en-US", "en-CA"],
+      uk: ["en-GB", "en-IE"],
+      au: ["en-AU", "en-NZ"],
+    };
+    const targets = accentMap[accent] || accentMap.us;
+    const exact = voicesRef.current.find((v) => targets.includes(v.lang));
+    if (exact) return exact;
+    const fallback = voicesRef.current.find((v) => v.lang?.startsWith?.("en"));
+    return fallback || voicesRef.current[0] || null;
+  };
+
+  const stopSpeech = () => {
+    if (!speechSupported || typeof window === "undefined") return;
+    window.speechSynthesis.cancel();
+    utteranceRef.current = null;
+    setIsSpeaking(false);
+    setIsPaused(false);
+  };
+
+  const speakBuyerReply = (text) => {
+    if (!speechSupported || !text?.trim() || typeof window === "undefined") return;
+    const synth = window.speechSynthesis;
+    stopSpeech();
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voice = pickVoice(selectedAccent);
+    if (voice) utterance.voice = voice;
+    utterance.rate = 0.98;
+    utterance.pitch = 1;
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      setIsPaused(false);
+      utteranceRef.current = null;
+    };
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      setIsPaused(false);
+      utteranceRef.current = null;
+    };
+    utteranceRef.current = utterance;
+    setIsSpeaking(true);
+    setIsPaused(false);
+    synth.speak(utterance);
+  };
 
   const startListening = async () => {
     setError("");
@@ -89,10 +177,18 @@ function App() {
     setIsLoading(true);
 
     try {
+      const idToken = await user.getIdToken();
+      
       const response = await fetch(API_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_text: transcript })
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${idToken}`
+        },
+        body: JSON.stringify({ 
+          user_text: transcript,
+          persona_prompt: selectedPersona?.prompt || ""
+        })
       });
 
       const data = await response.json().catch(() => ({}));
@@ -101,6 +197,7 @@ function App() {
         throw new Error(data?.feedback || data?.detail || "Unable to get buyer response. Please try again.");
       }
 
+      stopSpeech();
       setBuyerReply(data?.buyer_reply || "");
       setCoachFeedback(data?.feedback || "");
     } catch (err) {
@@ -112,22 +209,87 @@ function App() {
     }
   };
 
+  const handlePlayBuyerAudio = () => {
+    if (!speechSupported || !buyerReply) return;
+    const synth = window.speechSynthesis;
+    if (synth.paused && utteranceRef.current) {
+      synth.resume();
+      setIsPaused(false);
+      setIsSpeaking(true);
+      return;
+    }
+    speakBuyerReply(buyerReply);
+  };
+
+  const handlePauseBuyerAudio = () => {
+    if (!speechSupported || !buyerReply) return;
+    const synth = window.speechSynthesis;
+    if (synth.speaking && !synth.paused) {
+      synth.pause();
+      setIsPaused(true);
+      setIsSpeaking(true);
+    }
+  };
+
   const resetConversation = () => {
     setTranscript("");
     setBuyerReply("");
     setCoachFeedback("");
     setError("");
+    stopSpeech();
   };
+
+  const handlePersonaSelect = (persona) => {
+    setSelectedPersona(persona);
+    setView("practice");
+  };
+
+  const handleBackToDashboard = () => {
+    setView("dashboard");
+    resetConversation();
+  };
+
+  const handleStartPractice = () => {
+    setView("persona-selector");
+  };
+
+  const handleLoginSuccess = (loggedInUser) => {
+    setUser(loggedInUser);
+    setView("dashboard");
+  };
+
+  if (authLoading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)", color: "white", fontSize: "24px", fontWeight: "700" }}>
+        Loading...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  if (view === "dashboard") {
+    return <Dashboard user={user} onStartPractice={handleStartPractice} />;
+  }
+
+  if (view === "persona-selector") {
+    return <PersonaSelector onSelectPersona={handlePersonaSelect} onBack={handleBackToDashboard} />;
+  }
 
   return (
     <div className="app-shell">
       <header className="hero">
+        <button className="change-persona-btn" onClick={() => setView("persona-selector")}>
+          🎭 Change Buyer ({selectedPersona?.name || "Random"})
+        </button>
         <div className="hero-text">
           <p className="eyebrow">VoiceLogic • AI buyer simulator</p>
           <h1>Pitch, hear the buyer, get coached.</h1>
           <p className="subtitle">
-            Record your pitch, let the AI buyer react, then get instant coaching feedback.
-            Optimized for Chrome desktop.
+            Record or write your pitch, let the AI buyer react with natural questions, then get instant coaching
+            feedback. Optimized for Chrome desktop.
           </p>
         </div>
         <div className="status-row">
@@ -158,11 +320,22 @@ function App() {
           <div className="card-heading">
             <span className="icon">🎙️</span>
             <div>
-              <p className="eyebrow">Voice input</p>
-              <h2>Record your pitch</h2>
+              <p className="eyebrow">Pitch input</p>
+              <h2>Type or record your pitch</h2>
             </div>
           </div>
-          <p className="muted">We stop listening after the first result to avoid overlapping recordings.</p>
+          <p className="muted">You can type freely or record; we stop listening after the first result to avoid overlaps.</p>
+
+          <label className="label" htmlFor="typed-pitch">Type your pitch</label>
+          <textarea
+            id="typed-pitch"
+            className="text-entry"
+            rows={4}
+            value={transcript}
+            onChange={(e) => setTranscript(e.target.value)}
+            placeholder="Write your pitch or objection handling here..."
+            disabled={isListening || isLoading}
+          />
 
           <div className="button-row">
             <button className="primary" onClick={startListening} disabled={isListening || isLoading}>
@@ -197,6 +370,37 @@ function App() {
               <h2>What the buyer said</h2>
             </div>
           </div>
+
+            <div className="voice-controls">
+              <div className="voice-select">
+                <label className="label" htmlFor="accent">Buyer accent</label>
+                <select
+                  id="accent"
+                  value={selectedAccent}
+                  onChange={(e) => setSelectedAccent(e.target.value)}
+                  disabled={!speechSupported}
+                >
+                  <option value="us">English (US)</option>
+                  <option value="uk">English (UK)</option>
+                  <option value="au">English (AU/NZ)</option>
+                </select>
+                {!speechSupported && <p className="helper">Voice playback is unavailable in this browser.</p>}
+              </div>
+              <button
+                className="ghost play-voice"
+                onClick={handlePlayBuyerAudio}
+                disabled={!buyerReply || isLoading || !speechSupported}
+              >
+                {isPaused ? "Resume buyer audio" : "Play buyer audio"}
+              </button>
+              <button
+                className="ghost play-voice"
+                onClick={handlePauseBuyerAudio}
+                disabled={!buyerReply || isLoading || !speechSupported || !isSpeaking}
+              >
+                Pause
+              </button>
+            </div>
 
           <div className="conversation">
             <div className="bubble you">

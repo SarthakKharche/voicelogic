@@ -2,11 +2,22 @@ import logging
 import os
 from typing import List
 
+import firebase_admin
+from firebase_admin import credentials, auth as firebase_auth
 from openai import OpenAI
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+# Initialize Firebase Admin
+cred_path = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "voicelogic-firebase-adminsdk-fbsvc-095aacf4b6.json"
+)
+cred = credentials.Certificate(cred_path)
+firebase_admin.initialize_app(cred)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -27,7 +38,11 @@ app.add_middleware(
 
 
 class SimulationRequest(BaseModel):
-    user_text: str = Field(..., min_length=1, description="User's spoken pitch")
+    user_text: str = Field(..., min_length=1, description="User's spoken or typed pitch")
+    persona_prompt: str = Field(
+        default="",
+        description="Optional persona-specific instructions for buyer behavior",
+    )
 
 
 def _ensure_api_key() -> None:
@@ -35,22 +50,39 @@ def _ensure_api_key() -> None:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
 
-def _generate_buyer_reply(user_text: str) -> str:
+def _generate_buyer_reply(user_text: str, persona_prompt: str = "") -> str:
     _ensure_api_key()
+    
+    persona_instruction = persona_prompt if persona_prompt else (
+        "You are a real buyer in a conversation. Respond naturally like a human talking. "
+        "Use informal speech, show skepticism, ask a few quick questions, maybe push back a little."
+    )
+    
     prompt = f"""
-You are a realistic buyer persona for sales training.
-React naturally, raise objections, and negotiate based on the salesperson's pitch.
+{persona_instruction}
+
+Keep it SHORT—just 2-4 sentences max. Sound like you're actually speaking, not writing a structured document.
+
+FORBIDDEN: numbered lists, bullet points, bold text, asterisks, headers like "Buyer Persona", formal structure. Just talk.
 
 Salesperson says:
 {user_text}
-"""
+
+Your reply (as if speaking out loud):"""
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "You are a realistic buyer."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a real buyer in a sales conversation. Speak naturally and casually like a human would in real life. "
+                    "NO formatting, NO numbered lists, NO bullet points, NO asterisks, NO bold. Just plain conversational speech."
+                ),
+            },
             {"role": "user", "content": prompt},
         ],
+        temperature=0.9,
     )
     return response.choices[0].message.content
 
@@ -78,8 +110,26 @@ Buyer reply:
     return feedback.choices[0].message.content
 
 
+def verify_firebase_token(authorization: str = Header(None)) -> dict:
+    """Verify Firebase ID token from Authorization header"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    token = authorization.split("Bearer ")[1]
+    try:
+        decoded_token = firebase_auth.verify_id_token(token)
+        return decoded_token
+    except Exception as e:
+        logger.error(f"Token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
 @app.post("/simulate")
-async def simulate_buyer(data: SimulationRequest):
+async def simulate_buyer(data: SimulationRequest, authorization: str = Header(None)):
+    # Verify authentication
+    user_info = verify_firebase_token(authorization)
+    logger.info(f"Authenticated user: {user_info.get('email')}")
+    
     user_text = data.user_text.strip()
     if not user_text:
         return JSONResponse(
@@ -91,7 +141,7 @@ async def simulate_buyer(data: SimulationRequest):
         )
 
     try:
-        buyer_reply = _generate_buyer_reply(user_text)
+        buyer_reply = _generate_buyer_reply(user_text, data.persona_prompt)
         feedback = _generate_feedback(user_text, buyer_reply)
         return {"buyer_reply": buyer_reply, "feedback": feedback}
     except Exception as exc:  # noqa: BLE001
