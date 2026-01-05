@@ -11,11 +11,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Initialize Firebase Admin
-cred_path = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "voicelogic-firebase-adminsdk-fbsvc-095aacf4b6.json"
-)
+cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+if not cred_path:
+    raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS environment variable not set")
+
 cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 
